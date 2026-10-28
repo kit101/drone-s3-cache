@@ -9,6 +9,7 @@ package main
 
 import (
 	"os"
+	"time"
 
 	"github.com/drone-plugins/drone-plugin-lib/errors"
 	"github.com/drone-plugins/drone-plugin-lib/urfave"
@@ -146,6 +147,17 @@ func settingsFlags(settings *plugin.Settings) []cli.Flag {
 		},
 
 		// S3 information
+
+		&cli.StringFlag{
+			Name: "addressing-style", Usage: "S3 bucket addressing (auto,path,virtual)",
+			EnvVars: []string{"PLUGIN_ADDRESSING_STYLE", "CACHE_S3_ADDRESSING_STYLE"},
+			Value:   "auto", Destination: &settings.S3Options.AddressingStyle,
+		},
+		&cli.DurationFlag{
+			Name: "timeout", Usage: "maximum duration of each S3 operation",
+			EnvVars: []string{"PLUGIN_TIMEOUT", "CACHE_S3_TIMEOUT"},
+			Value:   10 * time.Minute, Destination: &settings.S3Options.Timeout,
+		},
 
 		&cli.StringFlag{
 			Name:        "endpoint",

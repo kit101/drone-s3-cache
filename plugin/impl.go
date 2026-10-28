@@ -6,6 +6,7 @@
 package plugin
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -15,7 +16,6 @@ import (
 
 	"github.com/drone-plugins/drone-s3-cache/storage/s3"
 	"github.com/drone/drone-cache-lib/archive/util"
-	"github.com/drone/drone-cache-lib/cache"
 	"github.com/drone/drone-cache-lib/storage"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -286,19 +286,18 @@ func (p *Plugin) Execute() error {
 		return err
 	}
 
-	c := cache.New(st, at)
-
-	if p.settings.Mode == rebuildMode {
+	switch p.settings.Mode {
+	case rebuildMode:
 		path := cleanPath(p.settings.Root, p.settings.Path, p.settings.Filename)
 		logrus.WithFields(logrus.Fields{
 			"path": path,
 		}).Info("rebuilding cache")
-		err = c.Rebuild(p.settings.mount, path)
+		err = rebuildCache(st, at, p.settings.mount, path)
 
 		if err == nil {
 			logrus.Infof("cache rebuilt")
 		}
-	} else if p.settings.Mode == restoreMode {
+	case restoreMode:
 		path := cleanPath(p.settings.Root, p.settings.Path, p.settings.Filename)
 		fallbackPath := cleanPath(p.settings.Root, p.settings.FallbackPath, p.settings.Filename)
 
@@ -306,20 +305,37 @@ func (p *Plugin) Execute() error {
 			"path":     path,
 			"fallback": fallbackPath,
 		}).Info("restoring cache")
-		err = c.Restore(path, fallbackPath)
+		err = restoreCache(st, at, path)
+		if err != nil && fallbackPath != path {
+			logrus.Warnf("Failed to retrieve %s, trying %s", path, fallbackPath)
+			err = restoreCache(st, at, fallbackPath)
+		}
+		if err != nil {
+			logrus.Warnf("Cache could not be restored: %v", err)
+			return nil
+		}
 
 		if err == nil {
 			logrus.Info("cache restored")
 		}
-	} else /* p.settings.Mode == flushMode */ {
+	default: // flushMode
 		flushPath := cleanPath(p.settings.Root, p.settings.FlushPath)
 
 		logrus.WithFields(logrus.Fields{
 			"path":    flushPath,
 			"max-age": p.settings.FlushAge,
 		}).Info("flushing cache")
-		f := cache.NewFlusher(st, genIsExpired(p.settings.FlushAge))
-		err = f.Flush(flushPath)
+		files, listErr := st.List(context.Background(), flushPath)
+		if listErr != nil {
+			return listErr
+		}
+		for _, file := range files {
+			if genIsExpired(p.settings.FlushAge)(file) {
+				if err = st.Delete(context.Background(), file.Path); err != nil {
+					return err
+				}
+			}
+		}
 
 		if err == nil {
 			logrus.Info("Cache flushed")
@@ -329,7 +345,7 @@ func (p *Plugin) Execute() error {
 	return err
 }
 
-func genIsExpired(age int) cache.DirtyFunc {
+func genIsExpired(age int) func(storage.FileEntry) bool {
 	return func(file storage.FileEntry) bool {
 		// Check if older than "age" days
 		return file.LastModified.Before(time.Now().AddDate(0, 0, age*-1))
