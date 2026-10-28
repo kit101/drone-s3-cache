@@ -2,9 +2,11 @@ package s3
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/drone/drone-cache-lib/storage"
 	"github.com/dustin/go-humanize"
@@ -23,6 +25,8 @@ type Options struct {
 	Token               string
 	FileCredentials     string
 	Profile             string
+	AddressingStyle     string
+	Timeout             time.Duration
 
 	// us-east-1
 	// us-west-1
@@ -43,8 +47,29 @@ type s3Storage struct {
 	ctx    context.Context
 }
 
-// New method creates an implementation of Storage with S3 as the backend.
-func New(opts *Options) (storage.Storage, error) {
+// ErrCacheMiss means the object is absent, not that a bucket or permission is missing.
+var ErrCacheMiss = errors.New("cache object not found")
+
+// New creates an S3 backend with cancellable object transfers.
+func New(opts *Options) (*s3Storage, error) {
+	lookup := minio.BucketLookupAuto
+	switch opts.AddressingStyle {
+	case "", "auto":
+	case "path":
+		lookup = minio.BucketLookupPath
+	case "virtual":
+		lookup = minio.BucketLookupDNS
+	default:
+		return nil, fmt.Errorf("invalid addressing style %q", opts.AddressingStyle)
+	}
+	if opts.Timeout < 0 {
+		return nil, fmt.Errorf("timeout must be positive")
+	}
+	copyOpts := *opts
+	opts = &copyOpts
+	if opts.Timeout == 0 {
+		opts.Timeout = 10 * time.Minute
+	}
 	var creds *credentials.Credentials
 	if len(opts.Access) != 0 && len(opts.Secret) != 0 {
 		creds = credentials.NewStaticV4(opts.Access, opts.Secret, opts.Token)
@@ -60,9 +85,10 @@ func New(opts *Options) (storage.Storage, error) {
 		}
 	}
 	client, err := minio.New(opts.Endpoint, &minio.Options{
-		Creds:  creds,
-		Secure: opts.UseSSL,
-		Region: opts.Region,
+		Creds:        creds,
+		Secure:       opts.UseSSL,
+		Region:       opts.Region,
+		BucketLookup: lookup,
 	})
 
 	if err != nil {
@@ -81,6 +107,12 @@ func New(opts *Options) (storage.Storage, error) {
 }
 
 func (s *s3Storage) Get(p string, dst io.Writer) error {
+	return s.GetContext(s.ctx, p, dst)
+}
+
+func (s *s3Storage) GetContext(ctx context.Context, p string, dst io.Writer) error {
+	ctx, cancel := context.WithTimeout(ctx, s.opts.Timeout)
+	defer cancel()
 	bucket, key := splitBucket(p)
 
 	if len(bucket) == 0 || len(key) == 0 {
@@ -92,21 +124,15 @@ func (s *s3Storage) Get(p string, dst io.Writer) error {
 		"key":    key,
 	}).Info("downloading file")
 
-	exists, err := s.client.BucketExists(s.ctx, bucket)
+	object, err := s.client.GetObject(ctx, bucket, key, minio.GetObjectOptions{})
 	if err != nil {
-		return fmt.Errorf("error when accessing bucket %s: %w", bucket, err)
-	} else if !exists {
-		return fmt.Errorf("bucket %s does not exist", bucket)
+		return cacheReadError(err)
 	}
-
-	object, err := s.client.GetObject(s.ctx, bucket, key, minio.GetObjectOptions{})
-	if err != nil {
-		return fmt.Errorf("could not retrieve %s from %s: %w", bucket, key, err)
-	}
+	defer object.Close()
 
 	numBytes, err := io.Copy(dst, object)
 	if err != nil {
-		return err
+		return cacheReadError(err)
 	}
 
 	logrus.WithFields(logrus.Fields{
@@ -118,6 +144,12 @@ func (s *s3Storage) Get(p string, dst io.Writer) error {
 }
 
 func (s *s3Storage) Put(p string, src io.Reader) error {
+	return s.PutContext(s.ctx, p, src)
+}
+
+func (s *s3Storage) PutContext(ctx context.Context, p string, src io.Reader) error {
+	ctx, cancel := context.WithTimeout(ctx, s.opts.Timeout)
+	defer cancel()
 	bucket, key := splitBucket(p)
 
 	if len(bucket) == 0 || len(key) == 0 {
@@ -129,23 +161,7 @@ func (s *s3Storage) Put(p string, src io.Reader) error {
 		"key":    key,
 	}).Info("uploading file")
 
-	exists, err := s.client.BucketExists(s.ctx, bucket)
-	if err != nil {
-		return fmt.Errorf("error when accessing bucket %s: %w", bucket, err)
-	} else if !exists {
-		return fmt.Errorf("bucket %s does not exist", bucket)
-	}
-
-	if !exists {
-		if err = s.client.MakeBucket(s.ctx, bucket, minio.MakeBucketOptions{Region: s.opts.Region}); err != nil {
-			return fmt.Errorf("could not create bucket %s: %w", bucket, err)
-		}
-		logrus.WithField("name", bucket).Info("bucket created")
-	} else {
-		logrus.WithField("name", bucket).Info("bucket found")
-	}
-
-	uploadInfo, err := s.client.PutObject(s.ctx, bucket, key, src, -1, minio.PutObjectOptions{ContentType: "application/tar"})
+	uploadInfo, err := s.client.PutObject(ctx, bucket, key, src, -1, minio.PutObjectOptions{ContentType: "application/tar"})
 	if err != nil {
 		return fmt.Errorf("could not put file in bucket %s at %s: %w", bucket, key, err)
 	}
@@ -159,6 +175,8 @@ func (s *s3Storage) Put(p string, src io.Reader) error {
 }
 
 func (s *s3Storage) List(p string) ([]storage.FileEntry, error) {
+	ctx, cancel := context.WithTimeout(s.ctx, s.opts.Timeout)
+	defer cancel()
 	bucket, key := splitBucket(p)
 
 	if len(bucket) == 0 || len(key) == 0 {
@@ -170,7 +188,7 @@ func (s *s3Storage) List(p string) ([]storage.FileEntry, error) {
 		"key":    key,
 	}).Info("finding objects")
 
-	exists, err := s.client.BucketExists(s.ctx, bucket)
+	exists, err := s.client.BucketExists(ctx, bucket)
 	if err != nil {
 		return nil, fmt.Errorf("error when accessing bucket %s: %w", bucket, err)
 	} else if !exists {
@@ -183,7 +201,7 @@ func (s *s3Storage) List(p string) ([]storage.FileEntry, error) {
 		Prefix:    key,
 	}
 
-	for object := range s.client.ListObjects(s.ctx, bucket, opts) {
+	for object := range s.client.ListObjects(ctx, bucket, opts) {
 		if object.Err != nil {
 			return nil, fmt.Errorf("could not get file in bucket %s at %s: %w", bucket, object.Key, object.Err)
 		}
@@ -211,6 +229,8 @@ func (s *s3Storage) List(p string) ([]storage.FileEntry, error) {
 }
 
 func (s *s3Storage) Delete(p string) error {
+	ctx, cancel := context.WithTimeout(s.ctx, s.opts.Timeout)
+	defer cancel()
 	bucket, key := splitBucket(p)
 
 	if len(bucket) == 0 || len(key) == 0 {
@@ -222,14 +242,14 @@ func (s *s3Storage) Delete(p string) error {
 		"key":    key,
 	}).Info("deleting object")
 
-	exists, err := s.client.BucketExists(s.ctx, bucket)
+	exists, err := s.client.BucketExists(ctx, bucket)
 	if err != nil {
 		return fmt.Errorf("error when accessing bucket %s: %w", bucket, err)
 	} else if !exists {
 		return fmt.Errorf("bucket %s does not exist", bucket)
 	}
 
-	err = s.client.RemoveObject(s.ctx, bucket, key, minio.RemoveObjectOptions{})
+	err = s.client.RemoveObject(ctx, bucket, key, minio.RemoveObjectOptions{})
 	if err != nil {
 		return fmt.Errorf("could not delete file in %s at %s: %w", bucket, key, err)
 	}
@@ -249,4 +269,12 @@ func splitBucket(p string) (string, string) {
 	}
 
 	return "", ""
+}
+
+func cacheReadError(err error) error {
+	code := minio.ToErrorResponse(err).Code
+	if code == "NoSuchKey" || code == "NoSuchObject" {
+		return fmt.Errorf("%w: %v", ErrCacheMiss, err)
+	}
+	return err
 }

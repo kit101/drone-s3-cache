@@ -286,14 +286,12 @@ func (p *Plugin) Execute() error {
 		return err
 	}
 
-	c := cache.New(st, at)
-
 	if p.settings.Mode == rebuildMode {
 		path := cleanPath(p.settings.Root, p.settings.Path, p.settings.Filename)
 		logrus.WithFields(logrus.Fields{
 			"path": path,
 		}).Info("rebuilding cache")
-		err = c.Rebuild(p.settings.mount, path)
+		err = rebuildCache(st, at, p.settings.mount, path)
 
 		if err == nil {
 			logrus.Infof("cache rebuilt")
@@ -306,7 +304,15 @@ func (p *Plugin) Execute() error {
 			"path":     path,
 			"fallback": fallbackPath,
 		}).Info("restoring cache")
-		err = c.Restore(path, fallbackPath)
+		err = restoreCache(st, at, path)
+		if err != nil && fallbackPath != path {
+			logrus.Warnf("Failed to retrieve %s, trying %s", path, fallbackPath)
+			err = restoreCache(st, at, fallbackPath)
+		}
+		if err != nil {
+			logrus.Warnf("Cache could not be restored: %v", err)
+			return nil
+		}
 
 		if err == nil {
 			logrus.Info("cache restored")
