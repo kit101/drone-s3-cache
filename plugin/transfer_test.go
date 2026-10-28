@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,16 +15,28 @@ import (
 )
 
 type testStorage struct {
-	get func(context.Context, string, io.Writer) error
+	get func(context.Context, string) (io.ReadCloser, error)
 	put func(context.Context, string, io.Reader) error
 }
 
-func (s testStorage) GetContext(ctx context.Context, p string, w io.Writer) error {
-	return s.get(ctx, p, w)
+func (s testStorage) Get(ctx context.Context, p string) (io.ReadCloser, error) { return s.get(ctx, p) }
+func (s testStorage) Put(ctx context.Context, p string, r io.Reader) error     { return s.put(ctx, p, r) }
+
+type testBody struct {
+	io.Reader
+	close func() error
 }
-func (s testStorage) PutContext(ctx context.Context, p string, r io.Reader) error {
-	return s.put(ctx, p, r)
+
+func (b *testBody) Close() error {
+	if b.close != nil {
+		return b.close()
+	}
+	return nil
 }
+
+type errorReader struct{ err error }
+
+func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
 
 type testArchive struct {
 	pack   func([]string, io.Writer) error
@@ -60,48 +73,65 @@ func TestRebuildPackFailure(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
-func TestRestoreUnpackFailureCancelsDownload(t *testing.T) {
+func TestRestoreUnpackFailureClosesBody(t *testing.T) {
 	want := errors.New("invalid archive")
-	stopped := make(chan struct{})
-	s := testStorage{get: func(ctx context.Context, _ string, _ io.Writer) error { <-ctx.Done(); close(stopped); return ctx.Err() }}
+	closed := false
+	var downloadCtx context.Context
+	s := testStorage{get: func(ctx context.Context, _ string) (io.ReadCloser, error) {
+		downloadCtx = ctx
+		return &testBody{Reader: strings.NewReader("data"), close: func() error { closed = true; return nil }}, nil
+	}}
 	a := testArchive{unpack: func(string, io.Reader) error { return want }}
-	if err := finishes(t, func() error { return restoreCache(s, a, "key") }); !errors.Is(err, want) {
+	if err := restoreCache(s, a, "path"); !errors.Is(err, want) {
 		t.Fatalf("got %v", err)
 	}
-	select {
-	case <-stopped:
-	default:
-		t.Fatal("download still running")
+	if !closed || downloadCtx.Err() != context.Canceled {
+		t.Fatal("download was not closed and canceled")
 	}
 }
 func TestRestoreDownloadFailure(t *testing.T) {
 	want := errors.New("connection lost")
-	s := testStorage{get: func(_ context.Context, _ string, w io.Writer) error {
-		_, err := w.Write([]byte("prefix"))
-		if err != nil {
-			return err
-		}
-		return want
-	}}
-	a := testArchive{unpack: func(_ string, r io.Reader) error { _, err := io.Copy(io.Discard, r); return err }}
-	if err := finishes(t, func() error { return restoreCache(s, a, "key") }); !errors.Is(err, want) {
+	s := testStorage{get: func(context.Context, string) (io.ReadCloser, error) { return nil, want }}
+	if err := restoreCache(s, testArchive{}, "path"); !errors.Is(err, want) {
 		t.Fatalf("got %v", err)
 	}
 }
 func TestRestoreDrainsArchiveTail(t *testing.T) {
 	for _, tailErr := range []error{nil, errors.New("tail transfer failed")} {
-		s := testStorage{get: func(_ context.Context, _ string, w io.Writer) error {
-			if _, err := w.Write([]byte("data and tail")); err != nil {
-				return err
-			}
-			return tailErr
+		s := testStorage{get: func(context.Context, string) (io.ReadCloser, error) {
+			return io.NopCloser(io.MultiReader(strings.NewReader("data and tail"), errorReader{tailErr})), nil
 		}}
+		// A successful reader must return EOF rather than repeatedly returning 0,nil.
+		if tailErr == nil {
+			s.get = func(context.Context, string) (io.ReadCloser, error) {
+				return io.NopCloser(strings.NewReader("data and tail")), nil
+			}
+		}
 		a := testArchive{unpack: func(_ string, r io.Reader) error { _, err := io.ReadFull(r, make([]byte, 1)); return err }}
-		if err := finishes(t, func() error { return restoreCache(s, a, "key") }); !errors.Is(err, tailErr) {
+		if err := restoreCache(s, a, "path"); !errors.Is(err, tailErr) {
 			t.Fatalf("got %v want %v", err, tailErr)
 		}
 	}
 }
+func TestRestoreCloseError(t *testing.T) {
+	want := errors.New("close failed")
+	s := testStorage{get: func(context.Context, string) (io.ReadCloser, error) {
+		return &testBody{Reader: strings.NewReader(""), close: func() error { return want }}, nil
+	}}
+	a := testArchive{unpack: func(string, io.Reader) error { return nil }}
+	if err := restoreCache(s, a, "path"); !errors.Is(err, want) {
+		t.Fatalf("got %v", err)
+	}
+}
+func TestRebuildDiscardedFooterError(t *testing.T) {
+	s := testStorage{put: func(context.Context, string, io.Reader) error { return nil }}
+	// The old tar/tgz Pack methods discard errors from their deferred Close writes.
+	a := testArchive{pack: func(_ []string, w io.Writer) error { _, _ = w.Write([]byte("footer")); return nil }}
+	if err := finishes(t, func() error { return rebuildCache(s, a, nil, "path") }); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("footer error lost: %v", err)
+	}
+}
+
 func inWorkspace(t *testing.T) string {
 	t.Helper()
 	old, err := os.Getwd()
@@ -134,9 +164,8 @@ func TestArchiveRoundTrip(t *testing.T) {
 				t.Fatal(err)
 			}
 			var buf bytes.Buffer
-			s := testStorage{put: func(_ context.Context, _ string, r io.Reader) error { _, err := io.Copy(&buf, r); return err }, get: func(_ context.Context, _ string, w io.Writer) error {
-				_, err := io.Copy(w, bytes.NewReader(buf.Bytes()))
-				return err
+			s := testStorage{put: func(_ context.Context, _ string, r io.Reader) error { _, err := io.Copy(&buf, r); return err }, get: func(context.Context, string) (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(buf.Bytes())), nil
 			}}
 			a, err := util.FromFilename(filename)
 			if err != nil {
@@ -159,5 +188,19 @@ func TestArchiveRoundTrip(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestRebuildPreservesSourceAndCleanupErrors(t *testing.T) {
+	sourceErr := errors.New("source failed")
+	cleanupErr := errors.New("multipart cleanup failed")
+	s := testStorage{put: func(_ context.Context, _ string, r io.Reader) error {
+		_, _ = io.Copy(io.Discard, r)
+		return cleanupErr
+	}}
+	a := testArchive{pack: func([]string, io.Writer) error { return sourceErr }}
+	err := rebuildCache(s, a, nil, "path")
+	if !errors.Is(err, sourceErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("lost source or cleanup error: %v", err)
 	}
 }

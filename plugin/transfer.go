@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -9,8 +10,22 @@ import (
 )
 
 type cacheStorage interface {
-	GetContext(context.Context, string, io.Writer) error
-	PutContext(context.Context, string, io.Reader) error
+	Get(context.Context, string) (io.ReadCloser, error)
+	Put(context.Context, string, io.Reader) error
+}
+
+// Track errors from final tar/gzip writes that cache-lib's Pack may discard.
+type checkedWriter struct {
+	io.Writer
+	err error
+}
+
+func (w *checkedWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if w.err == nil {
+		w.err = err
+	}
+	return n, err
 }
 
 func rebuildCache(s cacheStorage, a archive.Archive, srcs []string, dst string) error {
@@ -19,15 +34,22 @@ func rebuildCache(s cacheStorage, a archive.Archive, srcs []string, dst string) 
 	reader, writer := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := a.Pack(srcs, writer)
+		checked := &checkedWriter{Writer: writer}
+		err := a.Pack(srcs, checked)
+		if err == nil {
+			err = checked.err
+		}
 		_ = writer.CloseWithError(err)
 		done <- err
 	}()
-	uploadErr := s.PutContext(ctx, dst, reader)
-	// Wake a blocked archiver before waiting for it.
+	uploadErr := s.Put(ctx, dst, reader)
+	// Wake the archiver before waiting, even if the uploader never read the pipe.
 	_ = reader.CloseWithError(uploadErr)
 	cancel()
 	packErr := <-done
+	if packErr != nil && !errors.Is(packErr, uploadErr) && !errors.Is(packErr, io.ErrClosedPipe) {
+		return errors.Join(fmt.Errorf("pack cache: %w", packErr), uploadErr)
+	}
 	if uploadErr != nil {
 		return fmt.Errorf("upload cache: %w", uploadErr)
 	}
@@ -40,26 +62,17 @@ func rebuildCache(s cacheStorage, a archive.Archive, srcs []string, dst string) 
 func restoreCache(s cacheStorage, a archive.Archive, src string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	reader, writer := io.Pipe()
-	done := make(chan error, 1)
-	go func() {
-		err := s.GetContext(ctx, src, writer)
-		_ = writer.CloseWithError(err)
-		done <- err
-	}()
-	unpackErr := a.Unpack("", reader)
-	if unpackErr == nil {
-		// Tar may finish before the transport; still check the remaining stream.
-		_, unpackErr = io.Copy(io.Discard, reader)
+	body, err := s.Get(ctx, src)
+	if err != nil {
+		return fmt.Errorf("download cache: %w", err)
 	}
-	_ = reader.CloseWithError(unpackErr)
-	cancel()
-	downloadErr := <-done
-	if unpackErr != nil {
-		return fmt.Errorf("unpack cache: %w", unpackErr)
+	err = a.Unpack("", body)
+	if err == nil {
+		_, err = io.Copy(io.Discard, body)
 	}
-	if downloadErr != nil {
-		return fmt.Errorf("download cache: %w", downloadErr)
+	closeErr := body.Close()
+	if err != nil {
+		return fmt.Errorf("unpack cache: %w", err)
 	}
-	return nil
+	return closeErr
 }

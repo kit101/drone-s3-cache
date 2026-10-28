@@ -76,3 +76,63 @@ docker run --rm \
   -w $(pwd) \
   plugins/s3-cache
 ```
+
+## AWS SDK v2 storage
+
+This fork uses AWS SDK for Go v2 and `feature/s3/transfermanager` for uploads.
+Go 1.24 or newer is required; the Drone build images use Go 1.26. Dependency
+versions are pinned in `go.mod`.
+
+The existing `root`, `path`, `fallback_path`, `filename`, `mount`, credentials and
+mode settings remain. Normal restore still tries the current branch followed by
+the default branch and reports a warning without failing the build if neither
+can be restored. Rebuild errors fail the step. Buckets must already exist.
+
+```yaml
+settings:
+  mode: restore
+  endpoint: https://your-s3-endpoint.example
+  region: your-region
+  root: your-bucket
+  addressing_style: virtual
+  timeout: 10m
+  filename: archive.tar.gz
+```
+
+| Setting | Environment | Meaning |
+| --- | --- | --- |
+| `addressing_style` | `PLUGIN_ADDRESSING_STYLE`, `CACHE_S3_ADDRESSING_STYLE` | `auto` (default), `path`, or `virtual` |
+| `timeout` | `PLUGIN_TIMEOUT`, `CACHE_S3_TIMEOUT` | Go duration, default `10m`; zero selects the default |
+
+Use the regional service endpoint and put the bucket in `root`. `auto` retains
+path-style for custom non-AWS/non-Google endpoints; `virtual` uses the AWS
+resolver's bucket-host addressing, subject to bucket DNS/TLS compatibility.
+Use `virtual` for OBS and `path` or `auto` for a local MinIO endpoint.
+
+Explicit access/secret/session credentials take precedence over the SDK default
+credential chain. The existing credentials-file and profile options remain.
+Without explicit credentials, the SDK loads its normal environment, shared
+configuration and role providers. An omitted region uses the SDK configuration,
+falling back to `us-east-1`; specify the actual bucket region for other regions.
+S3 Transfer Acceleration retains its existing explicit endpoint option for AWS.
+
+Downloads return a response stream directly to the unpacker. Closing the stream
+releases the connection and cancels its timeout; successful unpacking also checks
+the remaining response bytes and close errors. Uploads stream the archive through
+a pipe. Failures close the pipe before waiting for the producer, preserve source
+errors and capture tar/gzip final-write errors discarded by the old archive
+library. Timeouts also close the archive pipe to interrupt the SDK's initial
+source read, before any HTTP request exists. Transfer Manager aborts failed multipart uploads; cancellation cleanup
+has a separate timeout of at most 10 seconds. Cleanup failures are reported and
+may require storage-side cleanup.
+
+For S3-compatible services, both the S3 client and Transfer Manager explicitly
+use checksum calculation `when_required`; response validation also uses
+`when_required`. This avoids optional checksum/trailer incompatibility while
+retaining checksums required by the operation.
+
+Archive formatting/extraction otherwise retains cache-lib's implementation.
+Archives must come from trusted writers; restoration is not an atomic directory
+replacement or an untrusted-archive sandbox.
+
+See the [migration and validation record](docs/aws-sdk-migration.zh-CN.md).
