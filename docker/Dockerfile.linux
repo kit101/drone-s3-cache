@@ -1,0 +1,6 @@
+FROM scratch
+ARG TARGETARCH
+# The upstream base is amd64-only; reuse its certificate bundle, not its platform metadata.
+COPY --from=plugins/base:multiarch /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY release/linux/${TARGETARCH}/drone-s3-cache /bin/drone-s3-cache
+ENTRYPOINT ["/bin/drone-s3-cache"]

@@ -14,7 +14,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 docker build -f docker/Dockerfile.linux.amd64 -t drone-s3-cache:local .
 ```
 
-在 Drone Runner 使用前，将镜像推送到 Runner 可访问的仓库，并替换下方示例的镜像地址。
+发布镜像地址为 `docker.io/kit101z/drone-s3-cache`，支持 Linux amd64、arm64。
 
 ## 使用
 
@@ -35,7 +35,7 @@ environment:
 
 steps:
   - name: cache-restore
-    image: your-registry/drone-s3-cache:your-tag
+    image: docker.io/kit101z/drone-s3-cache:latest
     settings:
       mode: restore
       root: ci-cache
@@ -48,7 +48,7 @@ steps:
       - npm run build
 
   - name: cache-rebuild
-    image: your-registry/drone-s3-cache:your-tag
+    image: docker.io/kit101z/drone-s3-cache:latest
     settings:
       mode: rebuild
       root: ci-cache
@@ -82,4 +82,13 @@ go test -race -cover -timeout 30s ./...
 golangci-lint run
 ```
 
-GitHub Actions 自动运行测试、lint 和 Linux amd64/arm64、Windows amd64 构建。
+GitHub Actions 自动运行测试、lint 和 Linux amd64/arm64、Windows amd64 构建，并验证双架构 Linux 镜像构建。
+
+## 镜像发布
+
+在仓库的 Actions secrets 中配置 `DOCKER_USERNAME` 和 `DOCKER_PASSWORD`（可使用有推送权限的 Docker Hub access token）。检查和构建通过后：
+
+- 推送到 `master`：发布 `docker.io/kit101z/drone-s3-cache:latest`。
+- 推送 `v*` tag：发布同名标签，例如 `docker.io/kit101z/drone-s3-cache:v1.0.0`。
+- 手动运行 CI：在 `master` 或 `v*` tag 上发布相应标签，其他分支仅检查。
+- PR：验证镜像构建，不登录或推送 Docker Hub。
