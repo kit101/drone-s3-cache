@@ -24,10 +24,6 @@ import (
 // Settings for the plugin.
 type Settings struct {
 	Mode         string
-	Key          string
-	KeyFiles     cli.StringSlice
-	FallbackKeys cli.StringSlice
-	resolvedKey  string
 	Root         string
 	Filename     string
 	Path         string
@@ -103,19 +99,6 @@ func (p *Plugin) validateMode() error {
 		p.settings.Filename = "archive.tar"
 	}
 	logrus.WithField("filename", p.settings.Filename).Debug("using filename")
-
-	if err := p.validateKey(); err != nil {
-		return err
-	}
-	if p.settings.Key != "" {
-		if mode == rebuildMode {
-			p.settings.mount = p.settings.Mount.Value()
-			if len(p.settings.mount) == 0 {
-				return fmt.Errorf("cache not specified")
-			}
-		}
-		return nil
-	}
 
 	// Validate mode settings
 	if mode != flushMode {
@@ -303,16 +286,8 @@ func (p *Plugin) Execute() error {
 		return err
 	}
 
-	if p.settings.Key != "" && p.settings.Mode == restoreMode {
-		return p.restoreByKey(st, at)
-	}
-
 	if p.settings.Mode == rebuildMode {
 		path := cleanPath(p.settings.Root, p.settings.Path, p.settings.Filename)
-		if p.settings.Key != "" {
-			path = p.keyPath(p.settings.resolvedKey)
-			logrus.WithField("resolved_key", p.settings.resolvedKey).Info("using cache key")
-		}
 		logrus.WithFields(logrus.Fields{
 			"path": path,
 		}).Info("rebuilding cache")

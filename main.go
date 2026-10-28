@@ -74,18 +74,6 @@ func run(settings *plugin.Settings) cli.ActionFunc {
 func settingsFlags(settings *plugin.Settings) []cli.Flag {
 	return []cli.Flag{
 		// Cache information
-		&cli.StringFlag{
-			Name: "key", Usage: "explicit cache key, or prefix for key-files digest",
-			EnvVars: []string{"PLUGIN_KEY"}, Destination: &settings.Key,
-		},
-		&cli.StringSliceFlag{
-			Name: "key-files", Usage: "workspace files used to compute the cache key",
-			EnvVars: []string{"PLUGIN_KEY_FILES"}, Destination: &settings.KeyFiles,
-		},
-		&cli.StringSliceFlag{
-			Name: "fallback-keys", Usage: "ordered exact keys to try on a cache miss",
-			EnvVars: []string{"PLUGIN_FALLBACK_KEYS"}, Destination: &settings.FallbackKeys,
-		},
 
 		&cli.StringFlag{
 			Name:        "mode",
