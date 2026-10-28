@@ -1,7 +1,5 @@
 # AWS SDK v2 迁移
 
-第一步只迁移存储与修复传输；缓存身份相关特性已独立保存，当前 PR 不包含其代码或文档。
-
 ## 实现范围
 
 - 采用 AWS SDK for Go v2 的配置、凭据链、S3 client 与 feature/s3/transfermanager；模块要求 Go 1.24，构建环境同步使用 Go 1.26。
@@ -10,7 +8,7 @@
 - 上传仍通过管道衔接归档器和 Transfer Manager，错误关闭管道，保留源错误并等待协程释放。捕获归档库忽略的尾部 Write 错误，不允许归档失败被当成成功；分片失败由官方工具清理，取消时使用独立有界的清理 context。SDK 在首个请求前读取归档流也可能阻塞，因此上传 timeout/context 取消时主动关闭输入管道，不能仅依赖 HTTP 超时。
 - OBS 兼容设置在 S3 client 与 Transfer Manager 两层均指定 when_required，仍验证服务要求的校验和。删除过期缓存继续由插件判断，适配层只负责 List/Delete。
 
-## 验收
+## 验证范围
 
 定向测试覆盖提前上传失败、打包及尾部写入失败、流式下载及资源释放、操作超时、分片源错误和网络拒绝后的 AbortMultipartUpload、旧配置与列表分页。实际 OBS/MinIO 往返在独立诊断空间执行；构建检查覆盖 Linux amd64/arm64 与 Windows amd64。实际结果如下。
 
@@ -22,5 +20,3 @@
 - 在已成功缓存的同一路径上，故意于超过分片阈值后让打包失败：CLI 返回错误，重新恢复仍是之前的成功内容；S3 ListMultipartUploads 确认该诊断前缀下没有未完成分片。只清理本次前缀，第二次列举确认对象数为 0。
 - 临时 MinIO 容器以随机测试密码分别验证 path/auto，覆盖 1 MiB 单次上传及 20 MiB 分片上传的 tar.gz 往返；无宿主数据挂载，容器结束后删除。
 - Linux amd64/arm64、Windows amd64 的无 CGO 构建通过；这些构建不等同跨平台运行验收。
-
-未发布镜像、未在 Drone Runner 执行新插件，也未改动 WeKnora 的正式流水线或缓存。原归档库的解包语义保持原样，不将这些兼容性测试视为恶意归档安全审计。

@@ -1,138 +1,85 @@
 # drone-s3-cache
 
-[![Build Status](http://cloud.drone.io/api/badges/drone-plugins/drone-s3-cache/status.svg)](http://cloud.drone.io/drone-plugins/drone-s3-cache)
-[![Gitter chat](https://badges.gitter.im/drone/drone.png)](https://gitter.im/drone/drone)
-[![Join the discussion at https://discourse.drone.io](https://img.shields.io/badge/discourse-forum-orange.svg)](https://discourse.drone.io)
-[![Drone questions at https://stackoverflow.com](https://img.shields.io/badge/drone-stackoverflow-orange.svg)](https://stackoverflow.com/questions/tagged/drone.io)
-[![](https://images.microbadger.com/badges/image/plugins/s3-cache.svg)](https://microbadger.com/images/plugins/s3-cache "Get your own image badge on microbadger.com")
-[![Go Doc](https://godoc.org/github.com/drone-plugins/drone-s3-cache?status.svg)](http://godoc.org/github.com/drone-plugins/drone-s3-cache)
-[![Go Report](https://goreportcard.com/badge/github.com/drone-plugins/drone-s3-cache)](https://goreportcard.com/report/github.com/drone-plugins/drone-s3-cache)
+Fork 自 [drone-plugins/drone-s3-cache](https://github.com/drone-plugins/drone-s3-cache)。
 
-Drone plugin that allows you to cache directories within the build workspace, this plugin is backed by S3 compatible storages. For the usage information and a listing of the available options please take a look at [the docs](http://plugins.drone.io/drone-plugins/drone-s3-cache/).
+用于 Drone CI 的目录缓存插件，将构建工作区中的目录归档到兼容 S3 的对象存储，并在后续构建中恢复。
 
-## Build
+## 构建
 
-Build the binary with the following command:
+需要 Go 1.24 或以上版本；CI 使用 Go 1.26。
 
-```console
-export GOOS=linux
-export GOARCH=amd64
-export CGO_ENABLED=0
-export GO111MODULE=on
-
-go build -v -a -tags netgo -o release/linux/amd64/drone-s3-cache
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -o release/linux/amd64/drone-s3-cache .
+docker build -f docker/Dockerfile.linux.amd64 -t drone-s3-cache:local .
 ```
 
-## Docker
+在 Drone Runner 使用前，将镜像推送到 Runner 可访问的仓库，并替换下方示例的镜像地址。
 
-Build the Docker image with the following command:
+## 使用
 
-```console
-docker build \
-  --label org.label-schema.build-date=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
-  --label org.label-schema.vcs-ref=$(git rev-parse --short HEAD) \
-  --file docker/Dockerfile.linux.amd64 --tag plugins/s3-cache .
-```
-
-## Usage
-
-```console
-docker run --rm \
-  -e PLUGIN_FLUSH=true \
-  -e PLUGIN_ENDPOINT="http://minio.company.com" \
-  -e PLUGIN_ACCESS_KEY="myaccesskey" \
-  -e PLUGIN_SECRET_KEY="mysecretKey" \
-  -v $(pwd):$(pwd) \
-  -w $(pwd) \
-  plugins/s3-cache
-
-docker run --rm \
-  -e PLUGIN_RESTORE=true \
-  -e PLUGIN_ENDPOINT="http://minio.company.com" \
-  -e PLUGIN_ACCESS_KEY="myaccesskey" \
-  -e PLUGIN_SECRET_KEY="mysecretKey" \
-  -e DRONE_REPO_OWNER="foo" \
-  -e DRONE_REPO_NAME="bar" \
-  -e DRONE_COMMIT_BRANCH="test" \
-  -v $(pwd):$(pwd) \
-  -w $(pwd) \
-  plugins/s3-cache
-
-docker run -it --rm \
-  -v $(pwd):$(pwd) \
-  -w $(pwd) \
-  alpine:latest sh -c "mkdir -p cache && echo 'testing cache' >> cache/test && cat cache/test"
-
-docker run --rm \
-  -e PLUGIN_REBUILD=true \
-  -e PLUGIN_MOUNT=".bundler" \
-  -e PLUGIN_ENDPOINT="http://minio.company.com" \
-  -e PLUGIN_ACCESS_KEY="myaccesskey" \
-  -e PLUGIN_SECRET_KEY="mysecretKey" \
-  -e DRONE_REPO_OWNER="foo" \
-  -e DRONE_REPO_NAME="bar" \
-  -e DRONE_COMMIT_BRANCH="test" \
-  -v $(pwd):$(pwd) \
-  -w $(pwd) \
-  plugins/s3-cache
-```
-
-## AWS SDK v2 storage
-
-This fork uses AWS SDK for Go v2 and `feature/s3/transfermanager` for uploads.
-Go 1.24 or newer is required; the Drone build images use Go 1.26. Dependency
-versions are pinned in `go.mod`.
-
-The existing `root`, `path`, `fallback_path`, `filename`, `mount`, credentials and
-mode settings remain. Normal restore still tries the current branch followed by
-the default branch and reports a warning without failing the build if neither
-can be restored. Rebuild errors fail the step. Buckets must already exist.
+以 Node.js 项目的 npm 下载缓存为例，构建前恢复，构建成功后回存。存储桶需要预先创建，凭据通过 Drone secrets 提供。
 
 ```yaml
-settings:
-  mode: restore
-  endpoint: https://your-s3-endpoint.example
-  region: your-region
-  root: your-bucket
-  addressing_style: virtual
-  timeout: 10m
-  filename: archive.tar.gz
+kind: pipeline
+type: docker
+name: build
+
+environment:
+  CACHE_S3_ENDPOINT: https://s3.example.com
+  CACHE_S3_REGION: us-east-1
+  CACHE_S3_ACCESS_KEY:
+    from_secret: cache_access_key
+  CACHE_S3_SECRET_KEY:
+    from_secret: cache_secret_key
+
+steps:
+  - name: cache-restore
+    image: your-registry/drone-s3-cache:your-tag
+    settings:
+      mode: restore
+      root: ci-cache
+      filename: npm.tar.gz
+
+  - name: build
+    image: node:24-alpine
+    commands:
+      - npm ci --cache .npm
+      - npm run build
+
+  - name: cache-rebuild
+    image: your-registry/drone-s3-cache:your-tag
+    settings:
+      mode: rebuild
+      root: ci-cache
+      filename: npm.tar.gz
+      mount:
+        - .npm
 ```
 
-| Setting | Environment | Meaning |
-| --- | --- | --- |
-| `addressing_style` | `PLUGIN_ADDRESSING_STYLE`, `CACHE_S3_ADDRESSING_STYLE` | `auto` (default), `path`, or `virtual` |
-| `timeout` | `PLUGIN_TIMEOUT`, `CACHE_S3_TIMEOUT` | Go duration, default `10m`; zero selects the default |
+## 配置
 
-Use the regional service endpoint and put the bucket in `root`. `auto` retains
-path-style for custom non-AWS/non-Google endpoints; `virtual` uses the AWS
-resolver's bucket-host addressing, subject to bucket DNS/TLS compatibility.
-Use `virtual` for OBS and `path` or `auto` for a local MinIO endpoint.
+| 配置 | 说明 |
+| --- | --- |
+| `mode` | `restore` 恢复、`rebuild` 回存、`flush` 清理过期缓存 |
+| `root` | 存储桶名称 |
+| `endpoint` / `region` | 对象存储入口和区域，也可通过全局环境变量 `CACHE_S3_ENDPOINT` / `CACHE_S3_REGION` 设置 |
+| `access_key` / `secret_key` | 访问凭据，也可通过 `CACHE_S3_ACCESS_KEY` / `CACHE_S3_SECRET_KEY` 设置 |
+| `filename` | 归档文件名，默认 `archive.tar`；使用 `.tar.gz` 后缀启用压缩 |
+| `mount` | 回存的目录列表 |
+| `path` | 桶内缓存路径，默认 `<仓库所有者>/<仓库名>/<分支>` |
+| `fallback_path` | 恢复失败时尝试的路径，默认指向仓库默认分支 |
+| `addressing_style` | `auto`（默认）、`path` 或 `virtual`；OBS 使用区域入口并设置 `virtual`，MinIO 可使用 `path` |
+| `timeout` | 单次存储操作超时，默认 `10m` |
+| `flush_path` / `flush_age` | 清理范围及过期天数，默认当前仓库路径及 30 天 |
 
-Explicit access/secret/session credentials take precedence over the SDK default
-credential chain. The existing credentials-file and profile options remain.
-Without explicit credentials, the SDK loads its normal environment, shared
-configuration and role providers. An omitted region uses the SDK configuration,
-falling back to `us-east-1`; specify the actual bucket region for other regions.
-S3 Transfer Acceleration retains its existing explicit endpoint option for AWS.
+`restore` 未能恢复缓存时输出警告并继续构建；`rebuild` 失败会使步骤失败。回存使用同一路径覆盖已有缓存，过期缓存需通过 `flush` 清理。
 
-Downloads return a response stream directly to the unpacker. Closing the stream
-releases the connection and cancels its timeout; successful unpacking also checks
-the remaining response bytes and close errors. Uploads stream the archive through
-a pipe. Failures close the pipe before waiting for the producer, preserve source
-errors and capture tar/gzip final-write errors discarded by the old archive
-library. Timeouts also close the archive pipe to interrupt the SDK's initial
-source read, before any HTTP request exists. Transfer Manager aborts failed multipart uploads; cancellation cleanup
-has a separate timeout of at most 10 seconds. Cleanup failures are reported and
-may require storage-side cleanup.
+## 开发检查
 
-For S3-compatible services, both the S3 client and Transfer Manager explicitly
-use checksum calculation `when_required`; response validation also uses
-`when_required`. This avoids optional checksum/trailer incompatibility while
-retaining checksums required by the operation.
+```sh
+go test -race -cover -timeout 30s ./...
+golangci-lint run
+```
 
-Archive formatting/extraction otherwise retains cache-lib's implementation.
-Archives must come from trusted writers; restoration is not an atomic directory
-replacement or an untrusted-archive sandbox.
-
-See the [migration and validation record](docs/aws-sdk-migration.zh-CN.md).
+GitHub Actions 自动运行测试、lint 和 Linux amd64/arm64、Windows amd64 构建。
