@@ -5,16 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
-
-	"github.com/drone/drone-cache-lib/archive"
 )
+
+type cacheArchive interface {
+	Pack([]string, io.Writer) error
+	Unpack(string, io.Reader) error
+}
 
 type cacheStorage interface {
 	Get(context.Context, string) (io.ReadCloser, error)
 	Put(context.Context, string, io.Reader) error
 }
 
-// Track errors from final tar/gzip writes that cache-lib's Pack may discard.
+// Preserve writer failures even when an archiver discards a final write error.
 type checkedWriter struct {
 	io.Writer
 	err error
@@ -28,7 +31,7 @@ func (w *checkedWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func rebuildCache(s cacheStorage, a archive.Archive, srcs []string, dst string) error {
+func rebuildCache(s cacheStorage, a cacheArchive, srcs []string, dst string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	reader, writer := io.Pipe()
@@ -59,7 +62,7 @@ func rebuildCache(s cacheStorage, a archive.Archive, srcs []string, dst string) 
 	return nil
 }
 
-func restoreCache(s cacheStorage, a archive.Archive, src string) error {
+func restoreCache(s cacheStorage, a cacheArchive, src string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	body, err := s.Get(ctx, src)

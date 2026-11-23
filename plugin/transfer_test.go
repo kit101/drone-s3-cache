@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/drone/drone-cache-lib/archive/util"
 )
 
 type testStorage struct {
@@ -151,43 +149,43 @@ func inWorkspace(t *testing.T) string {
 }
 func TestArchiveRoundTrip(t *testing.T) {
 	inWorkspace(t)
-	for _, filename := range []string{"archive.tar", "archive.tar.gz"} {
-		t.Run(filename, func(t *testing.T) {
-			if err := os.MkdirAll("cache/sub", 0755); err != nil {
-				t.Fatal(err)
-			}
-			want := bytes.Repeat([]byte("cache data"), 10000)
-			if err := os.WriteFile("cache/sub/value", want, 0644); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink("sub/value", "cache/link"); err != nil {
-				t.Fatal(err)
-			}
-			var buf bytes.Buffer
-			s := testStorage{put: func(_ context.Context, _ string, r io.Reader) error { _, err := io.Copy(&buf, r); return err }, get: func(context.Context, string) (io.ReadCloser, error) {
-				return io.NopCloser(bytes.NewReader(buf.Bytes())), nil
-			}}
-			a, err := util.FromFilename(filename)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = rebuildCache(s, a, []string{"cache"}, "key"); err != nil {
-				t.Fatal(err)
-			}
-			if err = os.RemoveAll("cache"); err != nil {
-				t.Fatal(err)
-			}
-			if err = restoreCache(s, a, "key"); err != nil {
-				t.Fatal(err)
-			}
-			got, err := os.ReadFile(filepath.Join("cache", "link"))
-			if err != nil || !bytes.Equal(got, want) {
-				t.Fatalf("roundtrip failed: %v", err)
-			}
-			if err = os.RemoveAll("cache"); err != nil {
-				t.Fatal(err)
-			}
-		})
+	workspace, _ := os.Getwd()
+	writeFile(t, "cache/sub/value", strings.Repeat("cache data", 10000))
+	if err := os.Symlink("sub/value", "cache/link"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod("cache/sub", 0555); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	s := testStorage{put: func(_ context.Context, _ string, r io.Reader) error { _, err := io.Copy(&buf, r); return err }, get: func(context.Context, string) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(buf.Bytes())), nil
+	}}
+	a := gzipArchive{workspace: workspace, paths: []string{"cache"}}
+	if err := rebuildCache(s, a, []string{"cache"}, "key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeCache("cache"); err != nil {
+		t.Fatal(err)
+	}
+	stage, err := os.MkdirTemp(workspace, ".restore-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = removeCache(stage) }()
+	a.destination = stage
+	if err := restoreCache(s, a, "key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishCache(workspace, stage, []string{"cache"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join("cache", "link"))
+	if err != nil || string(got) != strings.Repeat("cache data", 10000) {
+		t.Fatalf("roundtrip: %v", err)
+	}
+	if err := removeCache("cache"); err != nil {
+		t.Fatal(err)
 	}
 }
 

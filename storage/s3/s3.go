@@ -14,7 +14,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/drone/drone-cache-lib/storage"
 	"github.com/sirupsen/logrus"
 )
 
@@ -37,6 +36,12 @@ type s3Storage struct {
 	client   *awss3.Client
 	uploader *transfermanager.Client
 	timeout  time.Duration
+}
+
+type FileEntry struct {
+	Path         string
+	Size         int64
+	LastModified time.Time
 }
 
 func New(opts *Options) (*s3Storage, error) {
@@ -113,10 +118,24 @@ func New(opts *Options) (*s3Storage, error) {
 
 type responseBody struct {
 	io.ReadCloser
-	cancel context.CancelFunc
+	cancel  context.CancelFunc
+	path    string
+	started time.Time
+	bytes   int64
 }
 
-func (b *responseBody) Close() error { defer b.cancel(); return b.ReadCloser.Close() }
+func (b *responseBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.bytes += int64(n)
+	return n, err
+}
+
+func (b *responseBody) Close() error {
+	defer b.cancel()
+	err := b.ReadCloser.Close()
+	logrus.WithFields(logrus.Fields{"object": b.path, "bytes": b.bytes, "duration": time.Since(b.started)}).Info("cache download finished")
+	return err
+}
 
 func (s *s3Storage) Get(parent context.Context, p string) (io.ReadCloser, error) {
 	bucket, key := splitBucket(p)
@@ -130,7 +149,7 @@ func (s *s3Storage) Get(parent context.Context, p string) (io.ReadCloser, error)
 		return nil, err
 	}
 	logrus.WithField("path", p).Info("downloading file")
-	return &responseBody{ReadCloser: out.Body, cancel: cancel}, nil
+	return &responseBody{ReadCloser: out.Body, cancel: cancel, path: p, started: time.Now()}, nil
 }
 func (s *s3Storage) Put(parent context.Context, p string, src io.Reader) error {
 	bucket, key := splitBucket(p)
@@ -145,17 +164,18 @@ func (s *s3Storage) Put(parent context.Context, p string, src io.Reader) error {
 		defer stop()
 	}
 	logrus.WithField("path", p).Info("uploading file")
-	out, err := s.uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: src, ContentType: aws.String("application/tar")})
+	started := time.Now()
+	out, err := s.uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: src, ContentType: aws.String("application/gzip")})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
 			err = errors.Join(err, ctxErr)
 		}
 		return fmt.Errorf("upload %s: %w", p, err)
 	}
-	logrus.WithFields(logrus.Fields{"path": p, "size": out.ContentLength}).Info("file uploaded")
+	logrus.WithFields(logrus.Fields{"path": p, "bytes": aws.ToInt64(out.ContentLength), "duration": time.Since(started)}).Info("file uploaded")
 	return nil
 }
-func (s *s3Storage) List(parent context.Context, p string) ([]storage.FileEntry, error) {
+func (s *s3Storage) List(parent context.Context, p string) ([]FileEntry, error) {
 	bucket, key := splitBucket(p)
 	if bucket == "" || key == "" {
 		return nil, fmt.Errorf("invalid path %s", p)
@@ -163,14 +183,14 @@ func (s *s3Storage) List(parent context.Context, p string) ([]storage.FileEntry,
 	ctx, cancel := context.WithTimeout(parent, s.timeout)
 	defer cancel()
 	pages := awss3.NewListObjectsV2Paginator(s.client, &awss3.ListObjectsV2Input{Bucket: aws.String(bucket), Prefix: aws.String(key)})
-	var files []storage.FileEntry
+	var files []FileEntry
 	for pages.HasMorePages() {
 		page, err := pages.NextPage(ctx)
 		if err != nil {
 			return nil, err
 		}
 		for _, item := range page.Contents {
-			files = append(files, storage.FileEntry{Path: bucket + "/" + aws.ToString(item.Key), Size: aws.ToInt64(item.Size), LastModified: aws.ToTime(item.LastModified)})
+			files = append(files, FileEntry{Path: bucket + "/" + aws.ToString(item.Key), Size: aws.ToInt64(item.Size), LastModified: aws.ToTime(item.LastModified)})
 		}
 	}
 	logrus.WithFields(logrus.Fields{"path": p, "count": len(files)}).Info("found objects")

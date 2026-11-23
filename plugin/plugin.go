@@ -5,22 +5,23 @@
 
 package plugin
 
-import (
-	"github.com/drone-plugins/drone-plugin-lib/drone"
-)
+import "github.com/drone-plugins/drone-s3-cache/storage/s3"
 
-// Plugin implements drone.Plugin to provide the plugin implementation.
+type Settings struct {
+	Mode, Cache, Bucket, Owner, Repo string
+	KeyFromGit                       bool
+	CommitSHA                        string
+	FlushPath                        string
+	FlushAge                         int
+	FlushPathSet, FlushAgeSet        bool
+	CacheSet                         bool
+	S3Options                        s3.Options
+}
+
 type Plugin struct {
-	settings Settings
-	pipeline drone.Pipeline
-	network  drone.Network
+	settings  Settings
+	entries   []cacheEntry
+	workspace string
 }
 
-// New initializes a plugin from the given Settings, Pipeline, and Network.
-func New(settings Settings, pipeline drone.Pipeline, network drone.Network) drone.Plugin {
-	return &Plugin{
-		settings: settings,
-		pipeline: pipeline,
-		network:  network,
-	}
-}
+func New(settings Settings) *Plugin { return &Plugin{settings: settings} }
